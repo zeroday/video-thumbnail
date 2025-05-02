@@ -1,0 +1,20 @@
+# Exclude shell and user config files
+.bash_history
+.bash_logout
+.bashrc
+.profile
+.gitconfig
+
+# Exclude SSH keys and config
+.ssh/
+
+# Exclude cache and cursor server directories
+.cache/
+.cursor-server/
+
+# Exclude all mp4 video files
+*.mp4
+
+# Exclude OS and editor files
+.DS_Store
+Thumbs.db 
