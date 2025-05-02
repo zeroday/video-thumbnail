@@ -1,0 +1,28 @@
+# Project: Video Thumbnail Generator
+
+## Goal
+Generate a composite thumbnail image from a video file.
+
+## Process
+1. Decompose the video into individual frames.
+2. Retain only one frame per second of the video duration; discard the rest.
+3. Arrange the selected frames in a grid:
+   - Each row contains 60 frames (one per second, representing one minute).
+   - Each row represents one minute of video.
+   - Multiple rows represent multiple minutes.
+4. Output a single composite image with this layout.
+
+## Input
+- Video file (e.g., .mp4, .mov)
+
+## Output
+- Composite thumbnail image (e.g., .jpg, .png)
+
+## Tools & Libraries
+- Python (OpenCV, Pillow, or ffmpeg as needed)
+
+## Notes
+- The script should be able to handle videos of arbitrary length and resolution, including very large files (e.g., several GB in size).
+- Testing will include large files such as 2046.mp4 (4.1GB).
+- Optionally, frames may be resized to fit within a reasonable thumbnail size.
+- The output image should visually represent the timeline of the video, with time progressing left-to-right and top-to-bottom. 
