@@ -4,8 +4,8 @@ from PIL import Image
 import os
 
 # Configuration
-THUMBNAIL_WIDTH = 320
-THUMBNAIL_HEIGHT = 180
+THUMBNAIL_WIDTH = 640
+THUMBNAIL_HEIGHT = 480
 FRAMES_PER_ROW = 60
 OUTPUT_IMAGE = 'video_thumbnail.jpg'
 
