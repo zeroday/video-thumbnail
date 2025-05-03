@@ -308,7 +308,7 @@ def get_thumbnail_dimensions(size='default'):
     return width, height
 
 
-def extract_one_frame_per_second(video_path):
+def extract_one_frame_per_second(video_path, size='default'):
     logger.info(f"Starting frame extraction from {video_path}")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -321,7 +321,7 @@ def extract_one_frame_per_second(video_path):
     logger.info(f"Video info - FPS: {fps}, Total frames: {total_frames}, Duration: {duration} seconds")
     
     # Get thumbnail dimensions based on size parameter
-    width, height = get_thumbnail_dimensions()
+    width, height = get_thumbnail_dimensions(size)
     
     frames = []
     for sec in range(duration):
@@ -409,7 +409,7 @@ def main():
                 video_path = temp_file
 
             logger.info(f"Extracting frames from {video_path}")
-            frames = extract_one_frame_per_second(video_path)
+            frames = extract_one_frame_per_second(video_path, args.size)
             logger.info(f"Extracted {len(frames)} frames")
 
             logger.info("Creating composite thumbnail")
