@@ -32,8 +32,8 @@ THUMBNAIL_HEIGHT = 180  # 320 / (16/9) ≈ 180
 FRAMES_PER_ROW = 60
 OUTPUT_IMAGE = 'video_thumbnail.jpg'
 CHECKPOINT_FILE = 'thumbnail_checkpoint.npz'
-BATCH_SIZE = 100  # Reduced from 300 to 100 for better memory management
-MAX_FRAMES_IN_MEMORY = 1000  # Maximum number of frames to keep in memory
+BATCH_SIZE = 50  # Reduced from 100 to 50 for even better memory management
+MAX_FRAMES_IN_MEMORY = 500  # Reduced from 1000 to 500 for more conservative memory usage
 
 
 def find_dvd_mount():
@@ -319,7 +319,8 @@ def warn_xl_size(duration: float):
         logger.warning("Using XL size for videos longer than 1 hour may cause memory issues.")
         logger.warning("Consider using default size for very long videos.")
         logger.warning(f"Video duration: {duration/60:.1f} minutes")
-        logger.warning("Processing in smaller batches to manage memory usage")
+        logger.warning("Processing in very small batches (50 frames) to manage memory usage")
+        logger.warning("Maximum frames in memory: 500")
 
 
 def save_checkpoint(frames: List[np.ndarray], processed_count: int):
@@ -368,10 +369,14 @@ def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int
         # Save checkpoint and clear memory if we have too many frames
         if len(frames) % BATCH_SIZE == 0:
             save_checkpoint(frames, current_second)
-            if len(frames) >= MAX_FRAMES_IN_MEMORY:
-                logger.info(f"Reached maximum frames in memory ({MAX_FRAMES_IN_MEMORY}), saving checkpoint and clearing memory")
-                frames = []  # Clear frames from memory
-                frames, _ = load_checkpoint()  # Reload from checkpoint
+            logger.info(f"Saved checkpoint with {len(frames)} frames")
+            
+        if len(frames) >= MAX_FRAMES_IN_MEMORY:
+            logger.info(f"Reached maximum frames in memory ({MAX_FRAMES_IN_MEMORY}), saving checkpoint and clearing memory")
+            save_checkpoint(frames, current_second)  # Save one final time before clearing
+            frames = []  # Clear frames from memory
+            frames, _ = load_checkpoint()  # Reload from checkpoint
+            logger.info(f"Reloaded {len(frames)} frames from checkpoint")
                 
         current_second += 1
         
