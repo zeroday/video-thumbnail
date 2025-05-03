@@ -95,7 +95,7 @@ def get_video_duration(video_path):
         return None
 
 
-def analyze_vob_files(video_ts_path):
+def analyze_vob_files(video_ts_path, expected_duration=None):
     """Analyze VOB files to determine the main movie and its properties."""
     logger.info(f"Analyzing VOB files in {video_ts_path}")
     
@@ -127,35 +127,56 @@ def analyze_vob_files(video_ts_path):
         # Calculate total size of VOB files
         total_size = sum(os.path.getsize(f) for f in vts_vobs)
         
-        # Main movie is usually the largest set of VOB files
-        if main_movie_info is None or total_size > main_movie_info['total_size']:
-            main_movie_info = {
-                'ifo_file': ifo_file,
-                'vts_num': vts_num,
-                'vob_files': vts_vobs,
-                'total_size': total_size
-            }
-    
-    if main_movie_info:
-        logger.info(f"Main movie found: VTS {main_movie_info['vts_num']}")
-        logger.info(f"Number of VOB files: {len(main_movie_info['vob_files'])}")
-        logger.info(f"Total VOB size: {main_movie_info['total_size']/1024/1024:.1f} MB")
-        
         # Try to get duration from the first VOB file
         try:
             cmd = [
                 'ffprobe', '-v', 'error',
                 '-show_entries', 'format=duration',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
-                main_movie_info['vob_files'][0]
+                vts_vobs[0]
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 duration = float(result.stdout.strip())
-                main_movie_info['duration'] = duration
-                logger.info(f"Estimated duration: {duration/60:.1f} minutes")
+                logger.info(f"VTS {vts_num} duration: {duration/60:.1f} minutes")
+                
+                # If expected duration is provided, check if this title matches
+                if expected_duration is not None:
+                    duration_diff = abs(duration - expected_duration)
+                    if duration_diff > 60:  # More than 1 minute difference
+                        logger.warning(f"VTS {vts_num} duration ({duration/60:.1f} min) differs from expected duration ({expected_duration/60:.1f} min)")
+                        if duration > expected_duration * 2:  # More than twice the expected duration
+                            logger.error(f"VTS {vts_num} duration is significantly longer than expected. Skipping this title.")
+                            continue
+                
+                # Main movie is usually the largest set of VOB files with matching duration
+                if main_movie_info is None or (total_size > main_movie_info['total_size'] and 
+                                             (expected_duration is None or 
+                                              abs(duration - expected_duration) < abs(main_movie_info['duration'] - expected_duration))):
+                    main_movie_info = {
+                        'ifo_file': ifo_file,
+                        'vts_num': vts_num,
+                        'vob_files': vts_vobs,
+                        'total_size': total_size,
+                        'duration': duration
+                    }
         except Exception as e:
-            logger.warning(f"Could not determine duration: {str(e)}")
+            logger.warning(f"Could not determine duration for VTS {vts_num}: {str(e)}")
+    
+    if main_movie_info:
+        logger.info(f"Main movie found: VTS {main_movie_info['vts_num']}")
+        logger.info(f"Number of VOB files: {len(main_movie_info['vob_files'])}")
+        logger.info(f"Total VOB size: {main_movie_info['total_size']/1024/1024:.1f} MB")
+        logger.info(f"Estimated duration: {main_movie_info['duration']/60:.1f} minutes")
+        
+        # Final duration validation if expected duration is provided
+        if expected_duration is not None:
+            duration_diff = abs(main_movie_info['duration'] - expected_duration)
+            if duration_diff > 60:  # More than 1 minute difference
+                logger.warning(f"Main movie duration ({main_movie_info['duration']/60:.1f} min) differs from expected duration ({expected_duration/60:.1f} min)")
+                if main_movie_info['duration'] > expected_duration * 2:  # More than twice the expected duration
+                    logger.error("Main movie duration is significantly longer than expected. This might not be the correct title.")
+                    return None
         
         return main_movie_info
     else:
@@ -181,7 +202,7 @@ def extract_dvd_to_temp(video_path, expected_duration=None):
                 return None
             
             # Analyze VOB files before extraction
-            movie_info = analyze_vob_files(video_ts_path)
+            movie_info = analyze_vob_files(video_ts_path, expected_duration)
             if not movie_info:
                 return None
             
