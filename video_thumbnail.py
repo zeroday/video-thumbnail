@@ -11,6 +11,8 @@ import sys
 import traceback
 from datetime import datetime
 import re
+import numpy as np
+from typing import List, Tuple
 
 # Set up logging
 log_filename = f'video_thumbnail_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
@@ -29,8 +31,9 @@ THUMBNAIL_WIDTH = 320
 THUMBNAIL_HEIGHT = 180  # 320 / (16/9) ≈ 180
 FRAMES_PER_ROW = 60
 OUTPUT_IMAGE = 'video_thumbnail.jpg'
-CHECKPOINT_FILE = 'video_thumbnail_checkpoint.pkl'
-BATCH_SIZE = 300  # Process frames in batches to manage memory
+CHECKPOINT_FILE = 'thumbnail_checkpoint.npz'
+BATCH_SIZE = 100  # Reduced from 300 to 100 for better memory management
+MAX_FRAMES_IN_MEMORY = 1000  # Maximum number of frames to keep in memory
 
 
 def find_dvd_mount():
@@ -310,84 +313,68 @@ def get_thumbnail_dimensions(size='default'):
     return width, height
 
 
-def warn_xl_size(duration):
-    """Warn about potential memory issues with XL size for long videos."""
+def warn_xl_size(duration: float):
+    """Warn user about potential memory issues with XL size."""
     if duration > 3600:  # More than 1 hour
-        logger.warning(f"Using XL size for a long video ({duration/60:.1f} minutes) may cause memory issues")
-        logger.warning("Consider using default size or processing in smaller segments")
+        logger.warning("Using XL size for videos longer than 1 hour may cause memory issues.")
+        logger.warning("Consider using default size for very long videos.")
+        logger.warning(f"Video duration: {duration/60:.1f} minutes")
+        logger.warning("Processing in smaller batches to manage memory usage")
 
 
-def save_checkpoint(frames, current_second, video_path):
-    """Save progress to a checkpoint file."""
+def save_checkpoint(frames: List[np.ndarray], processed_count: int):
+    """Save checkpoint of processed frames."""
     try:
-        import pickle
-        checkpoint = {
-            'frames': frames,
-            'current_second': current_second,
-            'video_path': video_path
-        }
-        with open(CHECKPOINT_FILE, 'wb') as f:
-            pickle.dump(checkpoint, f)
-        logger.info(f"Saved checkpoint at second {current_second}")
+        np.savez_compressed(CHECKPOINT_FILE, frames=frames, count=processed_count)
+        logger.info(f"Saved checkpoint with {processed_count} frames")
     except Exception as e:
-        logger.warning(f"Failed to save checkpoint: {str(e)}")
+        logger.error(f"Error saving checkpoint: {e}")
 
 
-def load_checkpoint():
-    """Load progress from checkpoint file if it exists."""
-    try:
-        import pickle
-        if os.path.exists(CHECKPOINT_FILE):
-            with open(CHECKPOINT_FILE, 'rb') as f:
-                checkpoint = pickle.load(f)
-            logger.info(f"Loaded checkpoint at second {checkpoint['current_second']}")
-            return checkpoint
-    except Exception as e:
-        logger.warning(f"Failed to load checkpoint: {str(e)}")
-    return None
+def load_checkpoint() -> Tuple[List[np.ndarray], int]:
+    """Load checkpoint if it exists."""
+    if os.path.exists(CHECKPOINT_FILE):
+        try:
+            data = np.load(CHECKPOINT_FILE, allow_pickle=True)
+            frames = data['frames'].tolist()
+            count = int(data['count'])
+            logger.info(f"Loaded checkpoint with {count} frames")
+            return frames, count
+        except Exception as e:
+            logger.error(f"Error loading checkpoint: {e}")
+    return [], 0
 
 
-def process_frames_in_batches(cap, duration, width, height):
-    """Process frames in batches to manage memory."""
+def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int, height: int) -> List[np.ndarray]:
+    """Process frames in batches to manage memory usage."""
     frames = []
     current_second = 0
-    checkpoint = load_checkpoint()
-    
-    if checkpoint and checkpoint['video_path'] == cap.get(cv2.CAP_PROP_FILENAME):
-        frames = checkpoint['frames']
-        current_second = checkpoint['current_second']
-        logger.info(f"Resuming from second {current_second}")
     
     while current_second < duration:
-        batch_frames = []
-        batch_end = min(current_second + BATCH_SIZE, duration)
+        # Set position to current second
+        cap.set(cv2.CAP_PROP_POS_MSEC, current_second * 1000)
         
-        for sec in range(current_second, batch_end):
-            cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
-            ret, frame = cap.read()
-            if not ret:
-                logger.warning(f"Failed to read frame at second {sec}")
-                break
-            frame = cv2.resize(frame, (width, height))
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            batch_frames.append(img)
-            if sec % 60 == 0:
-                logger.info(f"Extracted {sec} seconds of frames")
+        # Read frame
+        ret, frame = cap.read()
+        if not ret:
+            logger.warning(f"Failed to read frame at {current_second} seconds")
+            current_second += 1
+            continue
+            
+        # Resize frame
+        frame = cv2.resize(frame, (width, height))
+        frames.append(frame)
         
-        frames.extend(batch_frames)
-        current_second = batch_end
+        # Save checkpoint and clear memory if we have too many frames
+        if len(frames) % BATCH_SIZE == 0:
+            save_checkpoint(frames, current_second)
+            if len(frames) >= MAX_FRAMES_IN_MEMORY:
+                logger.info(f"Reached maximum frames in memory ({MAX_FRAMES_IN_MEMORY}), saving checkpoint and clearing memory")
+                frames = []  # Clear frames from memory
+                frames, _ = load_checkpoint()  # Reload from checkpoint
+                
+        current_second += 1
         
-        # Save checkpoint after each batch
-        save_checkpoint(frames, current_second, cap.get(cv2.CAP_PROP_FILENAME))
-        
-        # Clear batch frames to free memory
-        batch_frames.clear()
-    
-    # Clean up checkpoint file after successful completion
-    if os.path.exists(CHECKPOINT_FILE):
-        os.remove(CHECKPOINT_FILE)
-    
     return frames
 
 
@@ -432,7 +419,7 @@ def make_composite_thumbnail(frames, thumb_per_row=FRAMES_PER_ROW):
     for idx, frame in enumerate(frames):
         x = (idx % thumb_per_row) * w
         y = (idx // thumb_per_row) * h
-        composite.paste(frame, (x, y))
+        composite.paste(Image.fromarray(frame), (x, y))
         if idx % 100 == 0:
             logger.info(f"Processed {idx} frames")
     
