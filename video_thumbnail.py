@@ -6,16 +6,34 @@ import subprocess
 import tempfile
 from pathlib import Path
 import glob
+import logging
+import sys
+import traceback
+from datetime import datetime
+import re
+
+# Set up logging
+log_filename = f'video_thumbnail_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
-THUMBNAIL_WIDTH = 640
-THUMBNAIL_HEIGHT = 480
+THUMBNAIL_WIDTH = 320
+THUMBNAIL_HEIGHT = 180  # 320 / (16/9) ≈ 180
 FRAMES_PER_ROW = 60
 OUTPUT_IMAGE = 'video_thumbnail.jpg'
 
 
 def find_dvd_mount():
     """Find DVD mount point in Chrome OS Linux container."""
+    logger.info("Searching for DVD mount points...")
     # Check common Chrome OS mount points
     mount_points = [
         '/mnt/chromeos/removable/*/VIDEO_TS',
@@ -25,133 +43,357 @@ def find_dvd_mount():
     for pattern in mount_points:
         matches = glob.glob(pattern)
         if matches:
-            return os.path.dirname(matches[0])  # Return the parent directory of VIDEO_TS
+            mount_point = os.path.dirname(matches[0])
+            logger.info(f"Found DVD mount point: {mount_point}")
+            return mount_point
+    logger.warning("No DVD mount points found")
     return None
 
 
 def is_dvd_device(path):
     """Check if the given path is a DVD device or mount point."""
+    logger.debug(f"Checking if {path} is a DVD device")
     if path.startswith('/dev/dvd') or path.startswith('/dev/sr'):
+        logger.info(f"Found DVD device: {path}")
         return True
     if os.path.exists(os.path.join(path, 'VIDEO_TS')):
+        logger.info(f"Found DVD mount point: {path}")
         return True
+    logger.debug(f"{path} is not a DVD device")
     return False
 
 
-def extract_dvd_to_temp(video_path):
+def parse_duration(duration_str):
+    """Parse duration string in format 'HH:MM:SS' or 'MM:SS' into seconds."""
+    parts = duration_str.split(':')
+    if len(parts) == 3:  # HH:MM:SS
+        hours, minutes, seconds = map(int, parts)
+        return hours * 3600 + minutes * 60 + seconds
+    elif len(parts) == 2:  # MM:SS
+        minutes, seconds = map(int, parts)
+        return minutes * 60 + seconds
+    else:
+        raise ValueError(f"Invalid duration format: {duration_str}")
+
+
+def get_video_duration(video_path):
+    """Get video duration in seconds using ffprobe."""
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        video_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+        logger.error(f"ffprobe failed: {result.stderr}")
+        return None
+    except Exception as e:
+        logger.error(f"Error getting video duration: {str(e)}")
+        return None
+
+
+def analyze_vob_files(video_ts_path):
+    """Analyze VOB files to determine the main movie and its properties."""
+    logger.info(f"Analyzing VOB files in {video_ts_path}")
+    
+    # Find all VOB files
+    vob_files = glob.glob(os.path.join(video_ts_path, 'VTS_*_[0-9].VOB'))
+    if not vob_files:
+        logger.error("No VOB files found")
+        return None
+    
+    # Get IFO files for analysis
+    ifo_files = glob.glob(os.path.join(video_ts_path, 'VTS_*_0.IFO'))
+    if not ifo_files:
+        logger.error("No IFO files found")
+        return None
+    
+    # Analyze each IFO file to find the main movie
+    main_movie_info = None
+    for ifo_file in ifo_files:
+        # Get the VTS number from the IFO filename
+        vts_num = os.path.basename(ifo_file).split('_')[1]
+        logger.debug(f"Analyzing VTS {vts_num}")
+        
+        # Get corresponding VOB files
+        vts_vobs = [f for f in vob_files if f'VTS_{vts_num}_' in f]
+        if not vts_vobs:
+            logger.warning(f"No VOB files found for VTS {vts_num}")
+            continue
+        
+        # Calculate total size of VOB files
+        total_size = sum(os.path.getsize(f) for f in vts_vobs)
+        
+        # Main movie is usually the largest set of VOB files
+        if main_movie_info is None or total_size > main_movie_info['total_size']:
+            main_movie_info = {
+                'ifo_file': ifo_file,
+                'vts_num': vts_num,
+                'vob_files': vts_vobs,
+                'total_size': total_size
+            }
+    
+    if main_movie_info:
+        logger.info(f"Main movie found: VTS {main_movie_info['vts_num']}")
+        logger.info(f"Number of VOB files: {len(main_movie_info['vob_files'])}")
+        logger.info(f"Total VOB size: {main_movie_info['total_size']/1024/1024:.1f} MB")
+        
+        # Try to get duration from the first VOB file
+        try:
+            cmd = [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                main_movie_info['vob_files'][0]
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                duration = float(result.stdout.strip())
+                main_movie_info['duration'] = duration
+                logger.info(f"Estimated duration: {duration/60:.1f} minutes")
+        except Exception as e:
+            logger.warning(f"Could not determine duration: {str(e)}")
+        
+        return main_movie_info
+    else:
+        logger.error("Could not determine main movie")
+        return None
+
+
+def extract_dvd_to_temp(video_path, expected_duration=None):
     """Extract DVD content to a temporary file using ffmpeg."""
+    logger.info(f"Starting DVD extraction from {video_path}")
     temp_dir = tempfile.mkdtemp()
+    logger.debug(f"Created temporary directory: {temp_dir}")
     output_path = os.path.join(temp_dir, 'dvd_content.mp4')
+    file_list = None
     
     try:
         # If it's a mount point, use the VIDEO_TS directory
         if os.path.isdir(video_path):
             video_ts_path = os.path.join(video_path, 'VIDEO_TS')
+            logger.debug(f"Checking VIDEO_TS directory: {video_ts_path}")
             if not os.path.exists(video_ts_path):
-                print(f"ERROR: VIDEO_TS directory not found at {video_ts_path}")
+                logger.error(f"VIDEO_TS directory not found at {video_ts_path}")
                 return None
             
-            # Find all VOB files
-            vob_files = glob.glob(os.path.join(video_ts_path, 'VTS_*_[0-9].VOB'))
-            if not vob_files:
-                print("ERROR: No VOB files found in VIDEO_TS directory")
+            # Analyze VOB files before extraction
+            movie_info = analyze_vob_files(video_ts_path)
+            if not movie_info:
                 return None
             
-            # Get the largest VOB file (usually the main movie)
-            largest_vob = max(vob_files, key=os.path.getsize)
-            print(f"Using VOB file: {largest_vob}")
-            video_path = largest_vob
-        
-        # Use ffmpeg to read from DVD and convert to MP4
-        cmd = [
-            'ffmpeg', '-i', video_path,
-            '-c:v', 'libx264', '-crf', '23',
-            '-preset', 'fast',
-            output_path
-        ]
-        print(f"Running ffmpeg command: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-        if os.path.exists(output_path):
-            return output_path
+            # Check for NVIDIA GPU support
+            nvidia_supported = False
+            try:
+                result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+                nvidia_supported = result.returncode == 0
+                if nvidia_supported:
+                    logger.info("NVIDIA GPU detected, will use hardware acceleration")
+            except Exception:
+                logger.info("No NVIDIA GPU detected, using software encoding")
+            
+            # Create concatenation string for VOB files
+            vob_files = sorted(movie_info['vob_files'])
+            concat_string = "concat:" + "|".join(vob_files)
+            logger.debug(f"Using concatenation string: {concat_string}")
+            
+            # Build ffmpeg command with appropriate options
+            cmd = ['ffmpeg', '-i', concat_string]
+            
+            # Add hardware acceleration if available
+            if nvidia_supported:
+                cmd.extend([
+                    '-hwaccel', 'cuda',
+                    '-hwaccel_device', '0',
+                    '-hwaccel_output_format', 'cuda',
+                    '-c:v', 'h264_nvenc'
+                ])
+            else:
+                cmd.extend(['-c:v', 'libx264'])
+            
+            # Add deinterlacing and other options
+            cmd.extend([
+                '-vf', 'yadif=1',  # Deinterlacing
+                '-crf', '23',
+                '-preset', 'fast',
+                output_path
+            ])
+            
+            logger.info(f"Running ffmpeg command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                logger.error(f"ffmpeg failed with return code {result.returncode}")
+                logger.error(f"ffmpeg stderr: {result.stderr}")
+                return None
+            
+            if os.path.exists(output_path):
+                logger.info(f"Successfully created output file: {output_path}")
+                
+                # Validate duration if expected duration is provided
+                if expected_duration is not None:
+                    actual_duration = get_video_duration(output_path)
+                    if actual_duration is not None:
+                        duration_diff = abs(actual_duration - expected_duration)
+                        if duration_diff > 60:  # More than 1 minute difference
+                            logger.warning(f"Extracted video duration ({actual_duration/60:.1f} min) differs from expected duration ({expected_duration/60:.1f} min)")
+                            
+                            # Try to fix the duration by re-encoding with duration constraint
+                            fixed_path = os.path.join(temp_dir, 'dvd_content_fixed.mp4')
+                            cmd = [
+                                'ffmpeg', '-i', concat_string,
+                                '-c:v', 'libx264',
+                                '-vf', 'yadif=1',
+                                '-crf', '23',
+                                '-preset', 'fast',
+                                '-t', str(expected_duration),
+                                fixed_path
+                            ]
+                            logger.info(f"Attempting to fix duration with command: {' '.join(cmd)}")
+                            result = subprocess.run(cmd, capture_output=True, text=True)
+                            
+                            if result.returncode == 0 and os.path.exists(fixed_path):
+                                logger.info("Successfully created fixed duration video")
+                                os.remove(output_path)
+                                os.rename(fixed_path, output_path)
+                            else:
+                                logger.error("Failed to fix video duration")
+                
+                return output_path
+            logger.error("Output file was not created")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error during DVD extraction: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
-    except subprocess.CalledProcessError as e:
-        print(f"Error extracting DVD content: {e}")
-        if e.stderr:
-            print(f"ffmpeg error output: {e.stderr}")
-        return None
+    finally:
+        # Clean up temporary files
+        if file_list and os.path.exists(file_list):
+            os.remove(file_list)
+            logger.debug(f"Removed temporary file list: {file_list}")
 
 
 def extract_one_frame_per_second(video_path):
+    logger.info(f"Starting frame extraction from {video_path}")
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.error(f"Failed to open video file: {video_path}")
+        return []
+    
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = int(total_frames / fps)
+    logger.info(f"Video info - FPS: {fps}, Total frames: {total_frames}, Duration: {duration} seconds")
+    
     frames = []
     for sec in range(duration):
         cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
         ret, frame = cap.read()
         if not ret:
+            logger.warning(f"Failed to read frame at second {sec}")
             break
         frame = cv2.resize(frame, (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT))
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(frame_rgb)
         frames.append(img)
+        if sec % 60 == 0:
+            logger.info(f"Extracted {sec} seconds of frames")
+    
     cap.release()
+    logger.info(f"Completed frame extraction. Total frames: {len(frames)}")
     return frames
 
 
 def make_composite_thumbnail(frames, thumb_per_row=FRAMES_PER_ROW):
+    logger.info(f"Creating composite thumbnail from {len(frames)} frames")
     if not frames:
+        logger.error("No frames to create thumbnail")
         return None
+    
     w, h = frames[0].size
     rows = math.ceil(len(frames) / thumb_per_row)
+    logger.info(f"Creating {rows} rows of thumbnails")
+    
     composite = Image.new('RGB', (w * thumb_per_row, h * rows))
     for idx, frame in enumerate(frames):
         x = (idx % thumb_per_row) * w
         y = (idx // thumb_per_row) * h
         composite.paste(frame, (x, y))
+        if idx % 100 == 0:
+            logger.info(f"Processed {idx} frames")
+    
+    logger.info("Completed composite thumbnail creation")
     return composite
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Generate a composite video thumbnail.')
-    parser.add_argument('video', help='Path to the video file, DVD device, or DVD mount point')
-    parser.add_argument('--output', default=OUTPUT_IMAGE, help='Output image file name')
-    args = parser.parse_args()
-
-    video_path = args.video
-    temp_file = None
-
     try:
-        if is_dvd_device(video_path):
-            print(f"Detected DVD device or mount point: {video_path}")
-            print("Extracting DVD content...")
-            dvd_mount = find_dvd_mount()
-            if dvd_mount:
-                video_path = dvd_mount
-            temp_file = extract_dvd_to_temp(video_path)
-            if not temp_file:
-                print("Failed to extract DVD content")
+        import argparse
+        parser = argparse.ArgumentParser(description='Generate a composite video thumbnail.')
+        parser.add_argument('video', help='Path to the video file, DVD device, or DVD mount point')
+        parser.add_argument('--output', default=OUTPUT_IMAGE, help='Output image file name')
+        parser.add_argument('--duration', help='Expected video duration in format HH:MM:SS or MM:SS')
+        args = parser.parse_args()
+
+        logger.info(f"Starting video thumbnail generation for {args.video}")
+        video_path = args.video
+        temp_file = None
+        temp_dir = None
+
+        # Parse expected duration if provided
+        expected_duration = None
+        if args.duration:
+            try:
+                expected_duration = parse_duration(args.duration)
+                logger.info(f"Expected video duration: {expected_duration} seconds")
+            except ValueError as e:
+                logger.error(f"Invalid duration format: {str(e)}")
                 return
-            video_path = temp_file
 
-        print(f"Extracting frames from {video_path}...")
-        frames = extract_one_frame_per_second(video_path)
-        print(f"Extracted {len(frames)} frames.")
+        try:
+            if is_dvd_device(video_path):
+                logger.info(f"Processing DVD: {video_path}")
+                dvd_mount = find_dvd_mount()
+                if dvd_mount:
+                    video_path = dvd_mount
+                temp_file = extract_dvd_to_temp(video_path, expected_duration)
+                if not temp_file:
+                    logger.error("Failed to extract DVD content")
+                    return
+                temp_dir = os.path.dirname(temp_file)
+                video_path = temp_file
 
-        print("Creating composite thumbnail...")
-        composite = make_composite_thumbnail(frames)
-        if composite:
-            composite.save(args.output)
-            print(f"Thumbnail saved as {args.output}")
-        else:
-            print("No frames extracted. Thumbnail not created.")
-    finally:
-        # Clean up temporary file if it was created
-        if temp_file and os.path.exists(temp_file):
-            os.remove(temp_file)
-            os.rmdir(os.path.dirname(temp_file))
+            logger.info(f"Extracting frames from {video_path}")
+            frames = extract_one_frame_per_second(video_path)
+            logger.info(f"Extracted {len(frames)} frames")
+
+            logger.info("Creating composite thumbnail")
+            composite = make_composite_thumbnail(frames)
+            if composite:
+                composite.save(args.output)
+                logger.info(f"Thumbnail saved as {args.output}")
+            else:
+                logger.error("No frames extracted. Thumbnail not created.")
+        finally:
+            # Clean up temporary files
+            if temp_file and os.path.exists(temp_file):
+                logger.debug(f"Removing temporary file: {temp_file}")
+                os.remove(temp_file)
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    logger.debug(f"Removing temporary directory: {temp_dir}")
+                    os.rmdir(temp_dir)
+                except OSError as e:
+                    logger.warning(f"Could not remove temporary directory {temp_dir}: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":
