@@ -1,0 +1,92 @@
+# Direct VOB Thumbnail Extraction Proposal
+
+## Current Process
+1. Concatenate VOB files into a single MP4
+2. Extract frames from the MP4
+3. Create thumbnail from frames
+
+## Proposed Process
+1. Read VOB files directly using OpenCV
+2. Extract frames from VOB files
+3. Create thumbnail from frames
+
+## Benefits
+- Eliminates the time-consuming MP4 conversion step
+- Reduces disk space usage (no temporary MP4 file)
+- Potentially faster overall processing
+
+## Technical Details
+
+### VOB File Structure
+- VOB files are MPEG-2 Program Streams
+- Each VOB file contains multiple GOPs (Group of Pictures)
+- I-frames (keyframes) are present at regular intervals
+
+### Required Changes
+1. Modify `extract_one_frame_per_second()` to handle VOB files:
+   ```python
+   def extract_one_frame_per_second(video_path, size='default'):
+       if is_vob_file(video_path):
+           return extract_from_vob(video_path, size)
+       else:
+           return extract_from_mp4(video_path, size)
+   ```
+
+2. Add VOB-specific extraction function:
+   ```python
+   def extract_from_vob(vob_path, size):
+       # Get VOB file duration using ffprobe
+       duration = get_vob_duration(vob_path)
+       
+       # Calculate frame positions
+       frame_positions = calculate_frame_positions(duration)
+       
+       # Extract frames using ffmpeg
+       frames = extract_frames_from_vob(vob_path, frame_positions, size)
+       
+       return frames
+   ```
+
+3. Add helper functions:
+   ```python
+   def is_vob_file(path):
+       return path.lower().endswith('.vob')
+   
+   def get_vob_duration(vob_path):
+       # Use ffprobe to get VOB duration
+       pass
+   
+   def calculate_frame_positions(duration):
+       # Calculate positions for one frame per second
+       pass
+   
+   def extract_frames_from_vob(vob_path, positions, size):
+       # Use ffmpeg to extract specific frames
+       pass
+   ```
+
+## Implementation Notes
+1. Use ffmpeg's `-ss` parameter to seek to specific timestamps
+2. Use `-vframes 1` to extract single frames
+3. Process VOB files sequentially
+4. Maintain batch processing for memory management
+5. Keep checkpoint functionality
+
+## Potential Challenges
+1. VOB files might have different frame rates
+2. Seeking in VOB files might be less accurate than MP4
+3. Need to handle VOB file concatenation properly
+4. Memory management might be different for VOB processing
+
+## Testing Requirements
+1. Test with various VOB files
+2. Compare extraction accuracy with MP4 method
+3. Measure performance improvement
+4. Verify memory usage patterns
+
+## Next Steps
+1. Implement proof of concept
+2. Test with sample VOB files
+3. Compare results with current method
+4. Optimize if needed
+5. Document any limitations 
