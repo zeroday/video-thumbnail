@@ -298,6 +298,16 @@ def extract_dvd_to_temp(video_path, expected_duration=None):
             logger.debug(f"Removed temporary file list: {file_list}")
 
 
+def get_thumbnail_dimensions(size='default'):
+    """Get thumbnail dimensions based on size parameter."""
+    if size == 'xl':
+        width = 640
+    else:  # default
+        width = 320
+    height = int(width / (16/9))  # Maintain 16:9 aspect ratio
+    return width, height
+
+
 def extract_one_frame_per_second(video_path):
     logger.info(f"Starting frame extraction from {video_path}")
     cap = cv2.VideoCapture(video_path)
@@ -310,6 +320,9 @@ def extract_one_frame_per_second(video_path):
     duration = int(total_frames / fps)
     logger.info(f"Video info - FPS: {fps}, Total frames: {total_frames}, Duration: {duration} seconds")
     
+    # Get thumbnail dimensions based on size parameter
+    width, height = get_thumbnail_dimensions()
+    
     frames = []
     for sec in range(duration):
         cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
@@ -317,7 +330,7 @@ def extract_one_frame_per_second(video_path):
         if not ret:
             logger.warning(f"Failed to read frame at second {sec}")
             break
-        frame = cv2.resize(frame, (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT))
+        frame = cv2.resize(frame, (width, height))
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(frame_rgb)
         frames.append(img)
@@ -358,7 +371,14 @@ def main():
         parser.add_argument('video', help='Path to the video file, DVD device, or DVD mount point')
         parser.add_argument('--output', default=OUTPUT_IMAGE, help='Output image file name')
         parser.add_argument('--duration', help='Expected video duration in format HH:MM:SS or MM:SS')
+        parser.add_argument('--size', choices=['default', 'xl'], default='default',
+                          help='Thumbnail size: default (320x180) or xl (640x360)')
         args = parser.parse_args()
+
+        # Update thumbnail dimensions based on size parameter
+        global THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT
+        THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT = get_thumbnail_dimensions(args.size)
+        logger.info(f"Using thumbnail dimensions: {THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT}")
 
         logger.info(f"Starting video thumbnail generation for {args.video}")
         video_path = args.video
