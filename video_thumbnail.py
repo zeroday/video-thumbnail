@@ -29,6 +29,8 @@ THUMBNAIL_WIDTH = 320
 THUMBNAIL_HEIGHT = 180  # 320 / (16/9) ≈ 180
 FRAMES_PER_ROW = 60
 OUTPUT_IMAGE = 'video_thumbnail.jpg'
+CHECKPOINT_FILE = 'video_thumbnail_checkpoint.pkl'
+BATCH_SIZE = 300  # Process frames in batches to manage memory
 
 
 def find_dvd_mount():
@@ -308,6 +310,87 @@ def get_thumbnail_dimensions(size='default'):
     return width, height
 
 
+def warn_xl_size(duration):
+    """Warn about potential memory issues with XL size for long videos."""
+    if duration > 3600:  # More than 1 hour
+        logger.warning(f"Using XL size for a long video ({duration/60:.1f} minutes) may cause memory issues")
+        logger.warning("Consider using default size or processing in smaller segments")
+
+
+def save_checkpoint(frames, current_second, video_path):
+    """Save progress to a checkpoint file."""
+    try:
+        import pickle
+        checkpoint = {
+            'frames': frames,
+            'current_second': current_second,
+            'video_path': video_path
+        }
+        with open(CHECKPOINT_FILE, 'wb') as f:
+            pickle.dump(checkpoint, f)
+        logger.info(f"Saved checkpoint at second {current_second}")
+    except Exception as e:
+        logger.warning(f"Failed to save checkpoint: {str(e)}")
+
+
+def load_checkpoint():
+    """Load progress from checkpoint file if it exists."""
+    try:
+        import pickle
+        if os.path.exists(CHECKPOINT_FILE):
+            with open(CHECKPOINT_FILE, 'rb') as f:
+                checkpoint = pickle.load(f)
+            logger.info(f"Loaded checkpoint at second {checkpoint['current_second']}")
+            return checkpoint
+    except Exception as e:
+        logger.warning(f"Failed to load checkpoint: {str(e)}")
+    return None
+
+
+def process_frames_in_batches(cap, duration, width, height):
+    """Process frames in batches to manage memory."""
+    frames = []
+    current_second = 0
+    checkpoint = load_checkpoint()
+    
+    if checkpoint and checkpoint['video_path'] == cap.get(cv2.CAP_PROP_FILENAME):
+        frames = checkpoint['frames']
+        current_second = checkpoint['current_second']
+        logger.info(f"Resuming from second {current_second}")
+    
+    while current_second < duration:
+        batch_frames = []
+        batch_end = min(current_second + BATCH_SIZE, duration)
+        
+        for sec in range(current_second, batch_end):
+            cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
+            ret, frame = cap.read()
+            if not ret:
+                logger.warning(f"Failed to read frame at second {sec}")
+                break
+            frame = cv2.resize(frame, (width, height))
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            batch_frames.append(img)
+            if sec % 60 == 0:
+                logger.info(f"Extracted {sec} seconds of frames")
+        
+        frames.extend(batch_frames)
+        current_second = batch_end
+        
+        # Save checkpoint after each batch
+        save_checkpoint(frames, current_second, cap.get(cv2.CAP_PROP_FILENAME))
+        
+        # Clear batch frames to free memory
+        batch_frames.clear()
+    
+    # Clean up checkpoint file after successful completion
+    if os.path.exists(CHECKPOINT_FILE):
+        os.remove(CHECKPOINT_FILE)
+    
+    return frames
+
+
 def extract_one_frame_per_second(video_path, size='default'):
     logger.info(f"Starting frame extraction from {video_path}")
     cap = cv2.VideoCapture(video_path)
@@ -323,19 +406,12 @@ def extract_one_frame_per_second(video_path, size='default'):
     # Get thumbnail dimensions based on size parameter
     width, height = get_thumbnail_dimensions(size)
     
-    frames = []
-    for sec in range(duration):
-        cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
-        ret, frame = cap.read()
-        if not ret:
-            logger.warning(f"Failed to read frame at second {sec}")
-            break
-        frame = cv2.resize(frame, (width, height))
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(frame_rgb)
-        frames.append(img)
-        if sec % 60 == 0:
-            logger.info(f"Extracted {sec} seconds of frames")
+    # Warn about potential memory issues with XL size
+    if size == 'xl':
+        warn_xl_size(duration)
+    
+    # Process frames in batches
+    frames = process_frames_in_batches(cap, duration, width, height)
     
     cap.release()
     logger.info(f"Completed frame extraction. Total frames: {len(frames)}")
