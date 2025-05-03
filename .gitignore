@@ -17,4 +17,7 @@
 
 # Exclude OS and editor files
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Log files
+video_thumbnail_*.log 
