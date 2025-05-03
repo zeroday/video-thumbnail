@@ -20,4 +20,7 @@
 Thumbs.db
 
 # Log files
-video_thumbnail_*.log 
+video_thumbnail_*.log
+
+# Exclude Cursor rules file
+.cursorrules 
