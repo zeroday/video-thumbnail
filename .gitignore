@@ -24,3 +24,6 @@ video_thumbnail_*.log
 
 # Exclude Cursor rules file
 .cursorrules 
+
+# Exclude checkpoint files
+*.npz 
