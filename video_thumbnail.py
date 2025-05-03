@@ -143,8 +143,8 @@ def analyze_vob_files(video_ts_path, expected_duration=None):
                 # If expected duration is provided, check if this title matches
                 if expected_duration is not None:
                     duration_diff = abs(duration - expected_duration)
-                    if duration_diff > 60:  # More than 1 minute difference
-                        logger.warning(f"VTS {vts_num} duration ({duration/60:.1f} min) differs from expected duration ({expected_duration/60:.1f} min)")
+                    if duration_diff > 3600:  # More than 1 hour difference
+                        logger.warning(f"VTS {vts_num} duration ({duration/60:.1f} min) differs significantly from expected duration ({expected_duration/60:.1f} min)")
                         if duration > expected_duration * 2:  # More than twice the expected duration
                             logger.error(f"VTS {vts_num} duration is significantly longer than expected. Skipping this title.")
                             continue
@@ -172,8 +172,8 @@ def analyze_vob_files(video_ts_path, expected_duration=None):
         # Final duration validation if expected duration is provided
         if expected_duration is not None:
             duration_diff = abs(main_movie_info['duration'] - expected_duration)
-            if duration_diff > 60:  # More than 1 minute difference
-                logger.warning(f"Main movie duration ({main_movie_info['duration']/60:.1f} min) differs from expected duration ({expected_duration/60:.1f} min)")
+            if duration_diff > 3600:  # More than 1 hour difference
+                logger.warning(f"Main movie duration ({main_movie_info['duration']/60:.1f} min) differs significantly from expected duration ({expected_duration/60:.1f} min)")
                 if main_movie_info['duration'] > expected_duration * 2:  # More than twice the expected duration
                     logger.error("Main movie duration is significantly longer than expected. This might not be the correct title.")
                     return None
@@ -259,8 +259,8 @@ def extract_dvd_to_temp(video_path, expected_duration=None):
                     actual_duration = get_video_duration(output_path)
                     if actual_duration is not None:
                         duration_diff = abs(actual_duration - expected_duration)
-                        if duration_diff > 60:  # More than 1 minute difference
-                            logger.warning(f"Extracted video duration ({actual_duration/60:.1f} min) differs from expected duration ({expected_duration/60:.1f} min)")
+                        if duration_diff > 3600:  # More than 1 hour difference
+                            logger.warning(f"Extracted video duration ({actual_duration/60:.1f} min) differs significantly from expected duration ({expected_duration/60:.1f} min)")
                             
                             # Try to fix the duration by re-encoding with duration constraint
                             fixed_path = os.path.join(temp_dir, 'dvd_content_fixed.mp4')
