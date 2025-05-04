@@ -13,6 +13,8 @@ from datetime import datetime
 import re
 import numpy as np
 from typing import List, Tuple
+import shutil
+import argparse
 
 # Set up logging
 log_filename = f'video_thumbnail_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
@@ -32,8 +34,10 @@ THUMBNAIL_HEIGHT = 180  # 320 / (16/9) ≈ 180
 FRAMES_PER_ROW = 60
 OUTPUT_IMAGE = 'video_thumbnail.jpg'
 CHECKPOINT_FILE = 'thumbnail_checkpoint.npz'
-BATCH_SIZE = 50  # Reduced from 100 to 50 for even better memory management
-MAX_FRAMES_IN_MEMORY = 500  # Reduced from 1000 to 500 for more conservative memory usage
+FRAMES_DIR = 'thumbnail_frames'  # Directory to store individual frames
+BATCH_SIZE = 25  # Reduced from 50 to 25 for even more conservative memory usage
+MAX_FRAMES_IN_MEMORY = 250  # Reduced from 500 to 250 for more conservative memory usage
+MEMORY_CLEAR_THRESHOLD = 200  # Clear memory when we reach this number of frames
 
 
 def find_dvd_mount():
@@ -319,37 +323,42 @@ def warn_xl_size(duration: float):
         logger.warning("Using XL size for videos longer than 1 hour may cause memory issues.")
         logger.warning("Consider using default size for very long videos.")
         logger.warning(f"Video duration: {duration/60:.1f} minutes")
-        logger.warning("Processing in very small batches (50 frames) to manage memory usage")
-        logger.warning("Maximum frames in memory: 500")
+        logger.warning("Processing in very small batches (25 frames) to manage memory usage")
+        logger.warning("Maximum frames in memory: 250")
+        logger.warning("Memory will be cleared at 200 frames")
 
 
-def save_checkpoint(frames: List[np.ndarray], processed_count: int):
-    """Save checkpoint of processed frames."""
+def save_checkpoint(data: dict, frame_count: int):
+    """Save checkpoint data to disk."""
     try:
-        np.savez_compressed(CHECKPOINT_FILE, frames=frames, count=processed_count)
-        logger.info(f"Saved checkpoint with {processed_count} frames")
+        np.savez_compressed(CHECKPOINT_FILE, **data)
+        logger.info(f"Saved checkpoint for frame {frame_count}")
     except Exception as e:
         logger.error(f"Error saving checkpoint: {e}")
 
 
-def load_checkpoint() -> Tuple[List[np.ndarray], int]:
+def load_checkpoint() -> Tuple[dict, int]:
     """Load checkpoint if it exists."""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             data = np.load(CHECKPOINT_FILE, allow_pickle=True)
-            frames = data['frames'].tolist()
-            count = int(data['count'])
-            logger.info(f"Loaded checkpoint with {count} frames")
-            return frames, count
+            frame_count = int(data['frame_count'])
+            current_second = int(data['current_second'])
+            logger.info(f"Loaded checkpoint at frame {frame_count}, second {current_second}")
+            return data, frame_count
         except Exception as e:
             logger.error(f"Error loading checkpoint: {e}")
-    return [], 0
+    return {}, 0
 
 
 def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int, height: int) -> List[np.ndarray]:
-    """Process frames in batches to manage memory usage."""
-    frames = []
+    """Process frames one at a time, saving each to disk immediately."""
+    # Create directory for frames if it doesn't exist
+    if not os.path.exists(FRAMES_DIR):
+        os.makedirs(FRAMES_DIR)
+    
     current_second = 0
+    frame_count = 0
     
     while current_second < duration:
         # Set position to current second
@@ -364,145 +373,111 @@ def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int
             
         # Resize frame
         frame = cv2.resize(frame, (width, height))
-        frames.append(frame)
         
-        # Save checkpoint and clear memory if we have too many frames
-        if len(frames) % BATCH_SIZE == 0:
-            save_checkpoint(frames, current_second)
-            logger.info(f"Saved checkpoint with {len(frames)} frames")
-            
-        if len(frames) >= MAX_FRAMES_IN_MEMORY:
-            logger.info(f"Reached maximum frames in memory ({MAX_FRAMES_IN_MEMORY}), saving checkpoint and clearing memory")
-            save_checkpoint(frames, current_second)  # Save one final time before clearing
-            frames = []  # Clear frames from memory
-            frames, _ = load_checkpoint()  # Reload from checkpoint
-            logger.info(f"Reloaded {len(frames)} frames from checkpoint")
-                
+        # Save frame to disk immediately
+        frame_path = os.path.join(FRAMES_DIR, f'frame_{frame_count:06d}.jpg')
+        cv2.imwrite(frame_path, frame)
+        
+        # Clear frame from memory
+        del frame
+        
+        # Save checkpoint after each frame
+        save_checkpoint({'frame_count': frame_count, 'current_second': current_second}, frame_count)
+        logger.info(f"Saved frame {frame_count} at {current_second} seconds")
+        
+        frame_count += 1
         current_second += 1
         
-    return frames
+        # Force garbage collection after each frame
+        import gc
+        gc.collect()
+    
+    return frame_count
 
 
-def extract_one_frame_per_second(video_path, size='default'):
-    logger.info(f"Starting frame extraction from {video_path}")
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        logger.error(f"Failed to open video file: {video_path}")
-        return []
+def create_thumbnail(frame_count: int, size: str = 'default') -> Image.Image:
+    """Create thumbnail image from saved frames."""
+    if frame_count == 0:
+        raise ValueError("No frames to create thumbnail from")
     
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = int(total_frames / fps)
-    logger.info(f"Video info - FPS: {fps}, Total frames: {total_frames}, Duration: {duration} seconds")
-    
-    # Get thumbnail dimensions based on size parameter
     width, height = get_thumbnail_dimensions(size)
     
-    # Warn about potential memory issues with XL size
-    if size == 'xl':
-        warn_xl_size(duration)
+    # Calculate grid dimensions
+    num_rows = (frame_count + FRAMES_PER_ROW - 1) // FRAMES_PER_ROW
+    thumbnail_width = width * FRAMES_PER_ROW
+    thumbnail_height = height * num_rows
     
-    # Process frames in batches
-    frames = process_frames_in_batches(cap, duration, width, height)
+    # Create blank thumbnail
+    thumbnail = Image.new('RGB', (thumbnail_width, thumbnail_height))
     
-    cap.release()
-    logger.info(f"Completed frame extraction. Total frames: {len(frames)}")
-    return frames
+    # Load and paste frames one at a time
+    for i in range(frame_count):
+        frame_path = os.path.join(FRAMES_DIR, f'frame_{i:06d}.jpg')
+        if os.path.exists(frame_path):
+            frame = Image.open(frame_path)
+            row = i // FRAMES_PER_ROW
+            col = i % FRAMES_PER_ROW
+            x = col * width
+            y = row * height
+            thumbnail.paste(frame, (x, y))
+            frame.close()  # Close the frame file immediately
+            
+            if i % 100 == 0:
+                logger.info(f"Processed {i} frames")
+    
+    return thumbnail
 
 
-def make_composite_thumbnail(frames, thumb_per_row=FRAMES_PER_ROW):
-    logger.info(f"Creating composite thumbnail from {len(frames)} frames")
-    if not frames:
-        logger.error("No frames to create thumbnail")
-        return None
-    
-    w, h = frames[0].size
-    rows = math.ceil(len(frames) / thumb_per_row)
-    logger.info(f"Creating {rows} rows of thumbnails")
-    
-    composite = Image.new('RGB', (w * thumb_per_row, h * rows))
-    for idx, frame in enumerate(frames):
-        x = (idx % thumb_per_row) * w
-        y = (idx // thumb_per_row) * h
-        composite.paste(Image.fromarray(frame), (x, y))
-        if idx % 100 == 0:
-            logger.info(f"Processed {idx} frames")
-    
-    logger.info("Completed composite thumbnail creation")
-    return composite
+def cleanup():
+    """Clean up temporary files and directories."""
+    if os.path.exists(FRAMES_DIR):
+        shutil.rmtree(FRAMES_DIR)
+        logger.info(f"Removed frames directory: {FRAMES_DIR}")
+    if os.path.exists(CHECKPOINT_FILE):
+        os.remove(CHECKPOINT_FILE)
+        logger.info(f"Removed checkpoint file: {CHECKPOINT_FILE}")
 
 
 def main():
-    try:
-        import argparse
-        parser = argparse.ArgumentParser(description='Generate a composite video thumbnail.')
-        parser.add_argument('video', help='Path to the video file, DVD device, or DVD mount point')
-        parser.add_argument('--output', default=OUTPUT_IMAGE, help='Output image file name')
-        parser.add_argument('--duration', help='Expected video duration in format HH:MM:SS or MM:SS')
-        parser.add_argument('--size', choices=['default', 'xl'], default='default',
-                          help='Thumbnail size: default (320x180) or xl (640x360)')
-        args = parser.parse_args()
-
-        # Update thumbnail dimensions based on size parameter
-        global THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT
-        THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT = get_thumbnail_dimensions(args.size)
-        logger.info(f"Using thumbnail dimensions: {THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT}")
-
-        logger.info(f"Starting video thumbnail generation for {args.video}")
-        video_path = args.video
-        temp_file = None
-        temp_dir = None
-
-        # Parse expected duration if provided
-        expected_duration = None
-        if args.duration:
-            try:
-                expected_duration = parse_duration(args.duration)
-                logger.info(f"Expected video duration: {expected_duration} seconds")
-            except ValueError as e:
-                logger.error(f"Invalid duration format: {str(e)}")
-                return
-
-        try:
-            if is_dvd_device(video_path):
-                logger.info(f"Processing DVD: {video_path}")
-                dvd_mount = find_dvd_mount()
-                if dvd_mount:
-                    video_path = dvd_mount
-                temp_file = extract_dvd_to_temp(video_path, expected_duration)
-                if not temp_file:
-                    logger.error("Failed to extract DVD content")
-                    return
-                temp_dir = os.path.dirname(temp_file)
-                video_path = temp_file
-
-            logger.info(f"Extracting frames from {video_path}")
-            frames = extract_one_frame_per_second(video_path, args.size)
-            logger.info(f"Extracted {len(frames)} frames")
-
-            logger.info("Creating composite thumbnail")
-            composite = make_composite_thumbnail(frames)
-            if composite:
-                composite.save(args.output)
-                logger.info(f"Thumbnail saved as {args.output}")
-            else:
-                logger.error("No frames extracted. Thumbnail not created.")
-        finally:
-            # Clean up temporary files
-            if temp_file and os.path.exists(temp_file):
-                logger.debug(f"Removing temporary file: {temp_file}")
-                os.remove(temp_file)
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    logger.debug(f"Removing temporary directory: {temp_dir}")
-                    os.rmdir(temp_dir)
-                except OSError as e:
-                    logger.warning(f"Could not remove temporary directory {temp_dir}: {str(e)}")
+    parser = argparse.ArgumentParser(description='Generate thumbnail from VOB file')
+    parser.add_argument('vob_path', help='Path to VOB file')
+    parser.add_argument('--size', choices=['default', 'xl'], default='default',
+                      help='Thumbnail size (default: 320x180, xl: 640x360)')
+    parser.add_argument('--output', default='video_thumbnail.jpg',
+                      help='Output image file name')
+    args = parser.parse_args()
     
+    try:
+        # Check if VOB file exists
+        if not os.path.exists(args.vob_path):
+            raise FileNotFoundError(f"VOB file not found: {args.vob_path}")
+        
+        # Get video duration and warn about XL size if needed
+        duration = get_video_duration(args.vob_path)
+        warn_xl_size(duration)
+        
+        # Try to load checkpoint
+        checkpoint_data, frame_count = load_checkpoint()
+        
+        if frame_count == 0:
+            # Process frames if no checkpoint found
+            frame_count = process_frames_in_batches(args.vob_path, args.size)
+        else:
+            logger.info(f"Resuming from checkpoint with {frame_count} frames")
+            remaining_frames = process_frames_in_batches(args.vob_path, args.size)
+            frame_count += remaining_frames
+        
+        # Create and save thumbnail
+        thumbnail = create_thumbnail(frame_count, args.size)
+        thumbnail.save(args.output)
+        logger.info(f"Thumbnail saved to {args.output}")
+        
+        # Clean up temporary files
+        cleanup()
+        
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+        logger.error(f"Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
