@@ -35,9 +35,9 @@ FRAMES_PER_ROW = 60
 OUTPUT_IMAGE = 'video_thumbnail.jpg'
 CHECKPOINT_FILE = 'thumbnail_checkpoint.npz'
 FRAMES_DIR = 'thumbnail_frames'  # Directory to store individual frames
-BATCH_SIZE = 25  # Reduced from 50 to 25 for even more conservative memory usage
-MAX_FRAMES_IN_MEMORY = 250  # Reduced from 500 to 250 for more conservative memory usage
-MEMORY_CLEAR_THRESHOLD = 200  # Clear memory when we reach this number of frames
+BATCH_SIZE = 5  # Reduced from 50 to 25 for even more conservative memory usage
+MAX_FRAMES_IN_MEMORY = 5  # Reduced from 500 to 250 for more conservative memory usage
+MEMORY_CLEAR_THRESHOLD = 5  # Clear memory when we reach this number of frames
 
 
 def find_dvd_mount():
@@ -128,7 +128,7 @@ def analyze_vob_files(video_ts_path, expected_duration=None):
         logger.debug(f"Analyzing VTS {vts_num}")
         
         # Get corresponding VOB files
-        vts_vobs = [f for f in vob_files if f'VTS_{vts_num}_' in f]
+        vts_vobs = sorted([f for f in vob_files if f'VTS_{vts_num}_' in f])
         if not vts_vobs:
             logger.warning(f"No VOB files found for VTS {vts_num}")
             continue
@@ -136,41 +136,46 @@ def analyze_vob_files(video_ts_path, expected_duration=None):
         # Calculate total size of VOB files
         total_size = sum(os.path.getsize(f) for f in vts_vobs)
         
-        # Try to get duration from the first VOB file
-        try:
-            cmd = [
-                'ffprobe', '-v', 'error',
-                '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                vts_vobs[0]
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                duration = float(result.stdout.strip())
-                logger.info(f"VTS {vts_num} duration: {duration/60:.1f} minutes")
-                
-                # If expected duration is provided, check if this title matches
-                if expected_duration is not None:
-                    duration_diff = abs(duration - expected_duration)
-                    if duration_diff > 3600:  # More than 1 hour difference
-                        logger.warning(f"VTS {vts_num} duration ({duration/60:.1f} min) differs significantly from expected duration ({expected_duration/60:.1f} min)")
-                        if duration > expected_duration * 2:  # More than twice the expected duration
-                            logger.error(f"VTS {vts_num} duration is significantly longer than expected. Skipping this title.")
-                            continue
-                
-                # Main movie is usually the largest set of VOB files with matching duration
-                if main_movie_info is None or (total_size > main_movie_info['total_size'] and 
-                                             (expected_duration is None or 
-                                              abs(duration - expected_duration) < abs(main_movie_info['duration'] - expected_duration))):
-                    main_movie_info = {
-                        'ifo_file': ifo_file,
-                        'vts_num': vts_num,
-                        'vob_files': vts_vobs,
-                        'total_size': total_size,
-                        'duration': duration
-                    }
-        except Exception as e:
-            logger.warning(f"Could not determine duration for VTS {vts_num}: {str(e)}")
+        # Try to get duration from all VOB files
+        total_duration = 0
+        for vob_file in vts_vobs:
+            try:
+                cmd = [
+                    'ffprobe', '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    vob_file
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    duration = float(result.stdout.strip())
+                    total_duration += duration
+            except Exception as e:
+                logger.warning(f"Could not determine duration for {vob_file}: {str(e)}")
+        
+        if total_duration > 0:
+            logger.info(f"VTS {vts_num} total duration: {total_duration/60:.1f} minutes")
+            
+            # If expected duration is provided, check if this title matches
+            if expected_duration is not None:
+                duration_diff = abs(total_duration - expected_duration)
+                if duration_diff > 3600:  # More than 1 hour difference
+                    logger.warning(f"VTS {vts_num} duration ({total_duration/60:.1f} min) differs significantly from expected duration ({expected_duration/60:.1f} min)")
+                    if total_duration > expected_duration * 2:  # More than twice the expected duration
+                        logger.error(f"VTS {vts_num} duration is significantly longer than expected. Skipping this title.")
+                        continue
+            
+            # Main movie is usually the largest set of VOB files with matching duration
+            if main_movie_info is None or (total_size > main_movie_info['total_size'] and 
+                                         (expected_duration is None or 
+                                          abs(total_duration - expected_duration) < abs(main_movie_info['duration'] - expected_duration))):
+                main_movie_info = {
+                    'ifo_file': ifo_file,
+                    'vts_num': vts_num,
+                    'vob_files': vts_vobs,
+                    'total_size': total_size,
+                    'duration': total_duration
+                }
     
     if main_movie_info:
         logger.info(f"Main movie found: VTS {main_movie_info['vts_num']}")
@@ -354,9 +359,9 @@ def load_checkpoint() -> Tuple[dict, int]:
 def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int, height: int) -> Image.Image:
     """Process frames one at a time, updating the composite image incrementally."""
     # Calculate grid dimensions
-    num_rows = (duration + FRAMES_PER_ROW - 1) // FRAMES_PER_ROW
-    thumbnail_width = width * FRAMES_PER_ROW
-    thumbnail_height = height * num_rows
+    num_rows = int((duration + FRAMES_PER_ROW - 1) // FRAMES_PER_ROW)
+    thumbnail_width = int(width * FRAMES_PER_ROW)
+    thumbnail_height = int(height * num_rows)
     
     # Create blank thumbnail
     thumbnail = Image.new('RGB', (thumbnail_width, thumbnail_height))
@@ -408,32 +413,67 @@ def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int
     return thumbnail
 
 
-def create_thumbnail(frame_count: int, size: str = 'default') -> Image.Image:
-    """Create thumbnail image from saved frames."""
-    if frame_count == 0:
-        raise ValueError("No frames to create thumbnail from")
-    
-    width, height = get_thumbnail_dimensions(size)
-    
-    # Calculate grid dimensions
-    num_rows = (frame_count + FRAMES_PER_ROW - 1) // FRAMES_PER_ROW
-    thumbnail_width = width * FRAMES_PER_ROW
-    thumbnail_height = height * num_rows
-    
-    # Create blank thumbnail
-    thumbnail = Image.new('RGB', (thumbnail_width, thumbnail_height))
-    
-    # Load and paste frames one at a time
-    for i in range(frame_count):
-        frame_path = os.path.join(FRAMES_DIR, f'frame_{i:06d}.jpg')
-        if os.path.exists(frame_path):
-            frame = Image.open(frame_path)
+def create_thumbnail(frames_or_count, size: str = 'default') -> Image.Image:
+    """Create thumbnail image from frames or frame count."""
+    if isinstance(frames_or_count, int):
+        frame_count = frames_or_count
+        if frame_count == 0:
+            raise ValueError("No frames to create thumbnail from")
+        
+        width, height = get_thumbnail_dimensions(size)
+        
+        # Calculate grid dimensions
+        num_rows = (frame_count + FRAMES_PER_ROW - 1) // FRAMES_PER_ROW
+        thumbnail_width = width * FRAMES_PER_ROW
+        thumbnail_height = height * num_rows
+        
+        # Create blank thumbnail
+        thumbnail = Image.new('RGB', (thumbnail_width, thumbnail_height))
+        
+        # Load and paste frames one at a time
+        for i in range(frame_count):
+            frame_path = os.path.join(FRAMES_DIR, f'frame_{i:06d}.jpg')
+            if os.path.exists(frame_path):
+                frame = Image.open(frame_path)
+                row = i // FRAMES_PER_ROW
+                col = i % FRAMES_PER_ROW
+                x = col * width
+                y = row * height
+                thumbnail.paste(frame, (x, y))
+                frame.close()  # Close the frame file immediately
+                
+                if i % 100 == 0:
+                    logger.info(f"Processed {i} frames")
+    else:
+        frames = frames_or_count
+        if not frames:
+            raise ValueError("No frames to create thumbnail from")
+        
+        width, height = get_thumbnail_dimensions(size)
+        
+        # Calculate grid dimensions
+        num_rows = (len(frames) + FRAMES_PER_ROW - 1) // FRAMES_PER_ROW
+        thumbnail_width = width * FRAMES_PER_ROW
+        thumbnail_height = height * num_rows
+        
+        # Create blank thumbnail
+        thumbnail = Image.new('RGB', (thumbnail_width, thumbnail_height))
+        
+        # Paste frames into grid
+        for i, frame in enumerate(frames):
             row = i // FRAMES_PER_ROW
             col = i % FRAMES_PER_ROW
             x = col * width
             y = row * height
-            thumbnail.paste(frame, (x, y))
-            frame.close()  # Close the frame file immediately
+            
+            # Convert BGR to RGB if needed
+            if isinstance(frame, np.ndarray):
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_pil = Image.fromarray(frame_rgb)
+            else:
+                frame_pil = frame
+            
+            thumbnail.paste(frame_pil, (x, y))
             
             if i % 100 == 0:
                 logger.info(f"Processed {i} frames")
@@ -449,6 +489,157 @@ def cleanup():
     if os.path.exists(CHECKPOINT_FILE):
         os.remove(CHECKPOINT_FILE)
         logger.info(f"Removed checkpoint file: {CHECKPOINT_FILE}")
+
+
+def is_vob_file(path):
+    """Check if the given path is a VOB file."""
+    return path.lower().endswith('.vob')
+
+
+def get_vob_duration(vob_path):
+    """Get duration of VOB file using ffprobe."""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            vob_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return float(result.stdout.strip())
+    except Exception as e:
+        logger.error(f"Error getting VOB duration: {e}")
+        raise
+
+
+def extract_frames_from_vob(vob_path, positions, size):
+    """Extract frames from VOB file at specified positions."""
+    width, height = get_thumbnail_dimensions(size)
+    frames = []
+    
+    for position in positions:
+        try:
+            # Use ffmpeg to extract frame at specific timestamp
+            cmd = [
+                'ffmpeg',
+                '-ss', str(position),
+                '-i', vob_path,
+                '-vframes', '1',
+                '-f', 'image2pipe',
+                '-vcodec', 'png',
+                '-'
+            ]
+            
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, err = process.communicate()
+            
+            if process.returncode != 0:
+                logger.error(f"Error extracting frame at {position}s: {err.decode()}")
+                continue
+                
+            # Convert PNG bytes to numpy array
+            nparr = np.frombuffer(out, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if frame is not None:
+                # Resize frame to thumbnail dimensions
+                frame = cv2.resize(frame, (width, height))
+                frames.append(frame)
+                
+        except Exception as e:
+            logger.error(f"Error processing frame at {position}s: {e}")
+            continue
+            
+    return frames
+
+
+def extract_one_frame_per_second(video_path, size='default'):
+    """Extract one frame per second from video file."""
+    if is_vob_file(video_path):
+        return extract_from_vob(video_path, size)
+    else:
+        return extract_from_mp4(video_path, size)
+
+
+def extract_from_vob(vob_path, size):
+    """Extract frames directly from VOB file."""
+    logger.info(f"Starting direct VOB extraction from {vob_path}")
+    
+    # Get video duration
+    duration = get_vob_duration(vob_path)
+    logger.info(f"Video duration: {duration:.2f} seconds")
+    
+    # Calculate frame positions (one per second)
+    frame_positions = list(range(int(duration)))
+    logger.info(f"Will extract {len(frame_positions)} frames")
+    
+    # Process frames in batches
+    all_frames = []
+    for i in range(0, len(frame_positions), BATCH_SIZE):
+        batch_positions = frame_positions[i:i + BATCH_SIZE]
+        logger.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(frame_positions) + BATCH_SIZE - 1)//BATCH_SIZE}")
+        
+        batch_frames = extract_frames_from_vob(vob_path, batch_positions, size)
+        all_frames.extend(batch_frames)
+        
+        # Save checkpoint after each batch
+        save_checkpoint({'frames': all_frames, 'frame_count': len(all_frames)}, len(all_frames))
+        
+        # Clear memory after each batch
+        import gc
+        gc.collect()
+    
+    logger.info(f"Successfully extracted {len(all_frames)} frames")
+    return all_frames
+
+
+def extract_from_mp4(video_path, size):
+    """Extract frames from MP4 file using OpenCV."""
+    logger.info(f"Starting MP4 extraction from {video_path}")
+    
+    # Get video duration
+    duration = get_video_duration(video_path)
+    if duration is None:
+        raise ValueError("Could not determine video duration")
+    
+    # Process frames using OpenCV
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Failed to open video file: {video_path}")
+    
+    frames = []
+    current_second = 0
+    frame_count = 0
+    
+    while current_second < duration:
+        # Set position to current second
+        cap.set(cv2.CAP_PROP_POS_MSEC, current_second * 1000)
+        
+        # Read frame
+        ret, frame = cap.read()
+        if not ret:
+            logger.warning(f"Failed to read frame at {current_second} seconds")
+            current_second += 1
+            continue
+            
+        # Resize frame
+        width, height = get_thumbnail_dimensions(size)
+        frame = cv2.resize(frame, (width, height))
+        frames.append(frame)
+        
+        # Save checkpoint after each frame
+        save_checkpoint({'frames': frames, 'frame_count': len(frames)}, len(frames))
+        
+        frame_count += 1
+        current_second += 1
+        
+        # Clear memory after each frame
+        import gc
+        gc.collect()
+    
+    cap.release()
+    return frames
 
 
 def main():
@@ -486,42 +677,38 @@ def main():
             dvd_mount = find_dvd_mount()
             if dvd_mount:
                 video_path = dvd_mount
-            temp_file = extract_dvd_to_temp(video_path, expected_duration)
-            if not temp_file:
-                logger.error("Failed to extract DVD content")
-                return
-            temp_dir = os.path.dirname(temp_file)
-            video_path = temp_file
-
-        # Get video duration and warn about XL size if needed
-        duration = get_video_duration(video_path)
-        if duration is None:
-            logger.error("Could not determine video duration")
-            return
-        warn_xl_size(duration)
-
-        # Try to load checkpoint
-        checkpoint_data, frame_count = load_checkpoint()
-        
-        if frame_count == 0:
-            # Process frames if no checkpoint found
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                logger.error(f"Failed to open video file: {video_path}")
-                return
-            thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
-            cap.release()
+                
+            # For XL size, use direct VOB extraction
+            if args.size == 'xl':
+                # Analyze VOB files
+                video_ts_path = os.path.join(video_path, 'VIDEO_TS')
+                movie_info = analyze_vob_files(video_ts_path, expected_duration)
+                if not movie_info:
+                    logger.error("Failed to analyze VOB files")
+                    return
+                
+                # Use the first VOB file for direct extraction
+                vob_file = movie_info['vob_files'][0]
+                frames = extract_from_vob(vob_file, args.size)
+            else:
+                # For default size, use MP4 conversion
+                temp_file = extract_dvd_to_temp(video_path, expected_duration)
+                if not temp_file:
+                    logger.error("Failed to extract DVD content")
+                    return
+                temp_dir = os.path.dirname(temp_file)
+                video_path = temp_file
+                frames = extract_from_mp4(video_path, args.size)
         else:
-            logger.info(f"Resuming from checkpoint with {frame_count} frames")
-            # For now, we'll restart from the beginning if we have a checkpoint
-            # TODO: Implement proper checkpoint resumption
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                logger.error(f"Failed to open video file: {video_path}")
-                return
-            thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
-            cap.release()
+            # For regular video files, use appropriate extraction method
+            if args.size == 'xl' and is_vob_file(video_path):
+                frames = extract_from_vob(video_path, args.size)
+            else:
+                frames = extract_from_mp4(video_path, args.size)
 
+        # Create thumbnail from frames
+        thumbnail = create_thumbnail(frames, args.size)
+        
         # Save the final thumbnail
         thumbnail.save(args.output)
         logger.info(f"Thumbnail saved to {args.output}")
