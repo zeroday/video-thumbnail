@@ -1,15 +1,16 @@
-# VOB Thumbnail Generator
+# Video Thumbnail Generator
 
-A Python script that generates a composite thumbnail image directly from VOB files without intermediate conversion.
+A Python script that generates a composite thumbnail image from video files, creating a visual timeline of the content. The script can process both standard video files and DVD VOB files.
 
 ## Features
 
-- Direct extraction of frames from VOB files
-- Memory-efficient batch processing
+- Generate composite thumbnails from video files
+- Memory-efficient frame processing
+- Support for different thumbnail sizes (320x180 or 640x360)
 - Checkpoint functionality for resuming interrupted processes
-- Support for different thumbnail sizes
 - Detailed logging
 - Automatic cleanup of temporary files
+- DVD VOB file support (secondary feature)
 
 ## Requirements
 
@@ -40,19 +41,37 @@ brew install ffmpeg
 
 ## Usage
 
-Basic usage:
+### Basic Video Processing
 ```bash
-python v2-vob-extraction.py path/to/video.vob
+python video_thumbnail.py path/to/video.mp4
 ```
 
-Advanced options:
+### Advanced Options
 ```bash
 # Specify output file
-python v2-vob-extraction.py path/to/video.vob --output my_thumbnail.jpg
+python video_thumbnail.py path/to/video.mp4 --output my_thumbnail.jpg
 
 # Use XL size (640x360)
-python v2-vob-extraction.py path/to/video.vob --size xl
+python video_thumbnail.py path/to/video.mp4 --size xl
 ```
+
+### DVD VOB Processing
+```bash
+# Basic VOB processing
+python video_thumbnail.py path/to/video.vob
+
+# VOB processing with duration
+python video_thumbnail.py path/to/video.vob --duration 02:30:00
+```
+
+## How It Works
+
+1. The script extracts one frame per second from the video
+2. Frames are arranged in a grid:
+   - Each row contains 60 frames (one per second, representing one minute)
+   - Each row represents one minute of video
+   - Multiple rows represent multiple minutes
+3. The final composite image provides a visual timeline of the video content
 
 ## Testing
 
@@ -60,17 +79,17 @@ python v2-vob-extraction.py path/to/video.vob --size xl
 
 1. Short video (1-5 minutes):
 ```bash
-python v2-vob-extraction.py test/short.vob
+python video_thumbnail.py test/short.mp4
 ```
 
 2. Medium video (30-60 minutes):
 ```bash
-python v2-vob-extraction.py test/medium.vob --size xl
+python video_thumbnail.py test/medium.mp4 --size xl
 ```
 
 3. Long video (1+ hours):
 ```bash
-python v2-vob-extraction.py test/long.vob
+python video_thumbnail.py test/long.mp4
 ```
 
 ### Expected Results
@@ -83,35 +102,36 @@ python v2-vob-extraction.py test/long.vob
 
 1. Start processing a long video:
 ```bash
-python v2-vob-extraction.py test/long.vob
+python video_thumbnail.py test/long.mp4
 ```
 
 2. Interrupt the process (Ctrl+C)
 
 3. Resume processing:
 ```bash
-python v2-vob-extraction.py test/long.vob
+python video_thumbnail.py test/long.mp4
 ```
 
 The script should resume from the last processed frame.
 
 ## Troubleshooting
 
-1. "VOB file not found":
-   - Verify the file path
+1. "Video file not found":
+   - Ensure the file path is correct
    - Check file permissions
 
-2. "Error getting VOB duration":
-   - Ensure FFprobe is installed
-   - Check if the VOB file is valid
+2. Memory issues with large videos:
+   - Use default size (320x180) instead of XL
+   - Process in smaller segments
 
-3. Memory issues with XL size:
-   - Use default size for very long videos
-   - Increase system swap space if needed
+3. VOB processing issues:
+   - Ensure the DVD is properly mounted
+   - Provide the correct duration with --duration parameter
+   - Check VOB file permissions
 
 ## Notes
 
-- The script processes frames in batches of 300 to manage memory usage
-- Checkpoint files are automatically cleaned up after successful completion
-- XL size (640x360) is recommended for videos under 1 hour
-- Default size (320x180) is recommended for longer videos 
+- The script maintains 16:9 aspect ratio for all thumbnail sizes
+- For DVD processing, always provide the --duration parameter
+- XL size (640x360) requires more memory and processing time
+- Temporary files are automatically cleaned up after processing 
