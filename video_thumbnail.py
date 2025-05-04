@@ -137,24 +137,50 @@ def analyze_vob_files(video_ts_path, expected_duration=None):
         total_size = sum(os.path.getsize(f) for f in vts_vobs)
         
         # Try to get duration from all VOB files
-        total_duration = 0
+        valid_durations = []
         for vob_file in vts_vobs:
             try:
+                # First try ffprobe
                 cmd = [
-                    'ffprobe', '-v', 'error',
+                    'ffprobe',
+                    '-v', 'error',
                     '-show_entries', 'format=duration',
                     '-of', 'default=noprint_wrappers=1:nokey=1',
-                    vob_file
+                    '-i', vob_file
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode == 0:
                     duration = float(result.stdout.strip())
-                    total_duration += duration
+                    if duration > 0 and duration < 3600:  # Only consider reasonable durations
+                        valid_durations.append(duration)
+                        continue
+                
+                # If ffprobe failed, try mplayer
+                cmd = [
+                    'mplayer', '-identify', '-frames', '0',
+                    '-vo', 'null', '-ao', 'null',
+                    vob_file
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if line.startswith('ID_LENGTH='):
+                            duration = float(line.split('=')[1])
+                            if duration > 0 and duration < 3600:  # Only consider reasonable durations
+                                valid_durations.append(duration)
+                                break
             except Exception as e:
                 logger.warning(f"Could not determine duration for {vob_file}: {str(e)}")
         
-        if total_duration > 0:
-            logger.info(f"VTS {vts_num} total duration: {total_duration/60:.1f} minutes")
+        if valid_durations:
+            # Calculate average duration per VOB
+            avg_duration = sum(valid_durations) / len(valid_durations)
+            # Estimate total duration based on number of VOB files
+            total_duration = avg_duration * len(vts_vobs)
+            
+            logger.info(f"VTS {vts_num} estimated duration: {total_duration/60:.1f} minutes")
+            logger.info(f"Average VOB duration: {avg_duration:.1f} seconds")
+            logger.info(f"Number of VOB files: {len(vts_vobs)}")
             
             # If expected duration is provided, check if this title matches
             if expected_duration is not None:
@@ -198,7 +224,116 @@ def analyze_vob_files(video_ts_path, expected_duration=None):
         return None
 
 
-def extract_dvd_to_temp(video_path, expected_duration=None):
+def check_gpu_support():
+    """Check if NVIDIA GPU acceleration is available."""
+    try:
+        result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+        if result.returncode == 0:
+            # Also check if ffmpeg supports CUDA
+            result = subprocess.run(['ffmpeg', '-hwaccels'], capture_output=True, text=True)
+            if result.returncode == 0 and 'cuda' in result.stdout:
+                logger.info("NVIDIA GPU acceleration is available")
+                return True
+    except Exception as e:
+        logger.debug(f"GPU check failed: {e}")
+    
+    logger.info("GPU acceleration is not available, using CPU processing")
+    return False
+
+
+def get_gpu_options(enable_gpu):
+    """Get ffmpeg options for GPU acceleration if enabled and available."""
+    if not enable_gpu:
+        return []
+    
+    if check_gpu_support():
+        return [
+            '-hwaccel', 'cuda',
+            '-hwaccel_device', '0',
+            '-hwaccel_output_format', 'cuda'
+        ]
+    return []
+
+
+def extract_frames_from_vob(vob_path, positions, size, enable_gpu=False):
+    """Extract frames from VOB file at specified positions."""
+    width, height = get_thumbnail_dimensions(size)
+    frames = []
+    
+    # Get GPU options if enabled
+    gpu_options = get_gpu_options(enable_gpu)
+    gpu_failed = False
+    
+    for position in positions:
+        max_retries = 3
+        retry_count = 0
+        success = False
+        
+        while not success and retry_count < max_retries:
+            try:
+                # Base command without acceleration
+                cmd = [
+                    'ffmpeg',
+                    '-ss', str(position),
+                    '-i', vob_path,
+                    '-vf', 'yadif=0',  # Deinterlace
+                    '-vframes', '1',
+                    '-f', 'image2pipe',
+                    '-vcodec', 'png',
+                    '-pix_fmt', 'rgb24',
+                    '-vsync', '0',
+                    '-q:v', '2',
+                    '-threads', '0',
+                    '-'
+                ]
+                
+                # Add GPU options if enabled and not failed
+                if gpu_options and not gpu_failed:
+                    cmd[1:1] = gpu_options
+                
+                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, err = process.communicate()
+                
+                if process.returncode != 0:
+                    error_msg = err.decode()
+                    if gpu_options and not gpu_failed and ('cuda' in error_msg.lower() or 'gpu' in error_msg.lower()):
+                        # GPU acceleration failed, retry without it
+                        logger.warning("GPU acceleration failed, falling back to CPU processing")
+                        gpu_failed = True
+                        continue
+                    
+                    logger.error(f"Error extracting frame at {position}s (attempt {retry_count + 1}): {error_msg}")
+                    retry_count += 1
+                    continue
+                
+                if not out:
+                    logger.warning(f"No image data returned for frame at {position}s (attempt {retry_count + 1})")
+                    retry_count += 1
+                    continue
+                    
+                # Convert PNG bytes to numpy array
+                nparr = np.frombuffer(out, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if frame is not None:
+                    frame = cv2.resize(frame, (width, height))
+                    frames.append(frame)
+                    success = True
+                else:
+                    logger.warning(f"Failed to decode frame at {position}s (attempt {retry_count + 1})")
+                    retry_count += 1
+                    
+            except Exception as e:
+                logger.error(f"Error processing frame at {position}s (attempt {retry_count + 1}): {e}")
+                retry_count += 1
+        
+        if not success:
+            logger.error(f"Failed to extract frame at {position}s after {max_retries} attempts")
+            
+    return frames
+
+
+def extract_dvd_to_temp(video_path, expected_duration=None, enable_gpu=False):
     """Extract DVD content to a temporary file using ffmpeg."""
     logger.info(f"Starting DVD extraction from {video_path}")
     temp_dir = tempfile.mkdtemp()
@@ -207,88 +342,82 @@ def extract_dvd_to_temp(video_path, expected_duration=None):
     file_list = None
     
     try:
-        # If it's a mount point, use the VIDEO_TS directory
         if os.path.isdir(video_path):
             video_ts_path = os.path.join(video_path, 'VIDEO_TS')
-            logger.debug(f"Checking VIDEO_TS directory: {video_ts_path}")
             if not os.path.exists(video_ts_path):
                 logger.error(f"VIDEO_TS directory not found at {video_ts_path}")
                 return None
             
-            # Analyze VOB files before extraction
             movie_info = analyze_vob_files(video_ts_path, expected_duration)
             if not movie_info:
                 return None
             
-            # Check for NVIDIA GPU support
-            nvidia_supported = False
-            try:
-                result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
-                nvidia_supported = result.returncode == 0
-                if nvidia_supported:
-                    logger.info("NVIDIA GPU detected, will use hardware acceleration")
-            except Exception:
-                logger.info("No NVIDIA GPU detected, using software encoding")
-            
-            # Create concatenation string for VOB files
             vob_files = sorted(movie_info['vob_files'])
             concat_string = "concat:" + "|".join(vob_files)
-            logger.debug(f"Using concatenation string: {concat_string}")
             
-            # Build ffmpeg command with appropriate options
-            cmd = ['ffmpeg', '-i', concat_string]
+            # Get GPU options if enabled
+            gpu_options = get_gpu_options(enable_gpu)
             
-            # Add hardware acceleration if available
-            if nvidia_supported:
-                cmd.extend([
-                    '-hwaccel', 'cuda',
-                    '-hwaccel_device', '0',
-                    '-hwaccel_output_format', 'cuda',
-                    '-c:v', 'h264_nvenc'
-                ])
-            else:
-                cmd.extend(['-c:v', 'libx264'])
-            
-            # Add deinterlacing and other options
-            cmd.extend([
-                '-vf', 'yadif=1',  # Deinterlacing
+            # Base command without acceleration
+            cmd = [
+                'ffmpeg',
+                '-i', concat_string,
+                '-c:v', 'libx264',
+                '-vf', 'yadif=1',
                 '-crf', '23',
                 '-preset', 'fast',
+                '-threads', '0',
                 output_path
-            ])
+            ]
+            
+            # Add GPU options and encoder if available
+            if gpu_options:
+                cmd[1:1] = gpu_options
+                # Replace CPU encoder with GPU encoder
+                cmd[cmd.index('-c:v') + 1] = 'h264_nvenc'
             
             logger.info(f"Running ffmpeg command: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True)
             
             if result.returncode != 0:
-                logger.error(f"ffmpeg failed with return code {result.returncode}")
-                logger.error(f"ffmpeg stderr: {result.stderr}")
-                return None
+                error_msg = result.stderr
+                if gpu_options and ('cuda' in error_msg.lower() or 'gpu' in error_msg.lower()):
+                    # GPU acceleration failed, retry without it
+                    logger.warning("GPU acceleration failed, falling back to CPU processing")
+                    # Remove GPU options and use CPU encoder
+                    for opt in gpu_options:
+                        if opt in cmd:
+                            cmd.remove(opt)
+                    cmd[cmd.index('-c:v') + 1] = 'libx264'
+                    
+                    logger.info("Retrying with CPU processing...")
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    logger.error(f"ffmpeg failed with return code {result.returncode}")
+                    logger.error(f"ffmpeg stderr: {result.stderr}")
+                    return None
             
             if os.path.exists(output_path):
                 logger.info(f"Successfully created output file: {output_path}")
                 
-                # Validate duration if expected duration is provided
+                # Duration validation and fixing
                 if expected_duration is not None:
                     actual_duration = get_video_duration(output_path)
                     if actual_duration is not None:
                         duration_diff = abs(actual_duration - expected_duration)
-                        if duration_diff > 3600:  # More than 1 hour difference
+                        if duration_diff > 3600:
                             logger.warning(f"Extracted video duration ({actual_duration/60:.1f} min) differs significantly from expected duration ({expected_duration/60:.1f} min)")
                             
-                            # Try to fix the duration by re-encoding with duration constraint
                             fixed_path = os.path.join(temp_dir, 'dvd_content_fixed.mp4')
-                            cmd = [
-                                'ffmpeg', '-i', concat_string,
-                                '-c:v', 'libx264',
-                                '-vf', 'yadif=1',
-                                '-crf', '23',
-                                '-preset', 'fast',
-                                '-t', str(expected_duration),
-                                fixed_path
-                            ]
-                            logger.info(f"Attempting to fix duration with command: {' '.join(cmd)}")
-                            result = subprocess.run(cmd, capture_output=True, text=True)
+                            # Use the same acceleration settings for fixing
+                            fix_cmd = cmd.copy()
+                            fix_cmd[-1] = fixed_path  # Replace output path
+                            fix_cmd.insert(-1, '-t')  # Add duration limit
+                            fix_cmd.insert(-1, str(expected_duration))
+                            
+                            logger.info(f"Attempting to fix duration with command: {' '.join(fix_cmd)}")
+                            result = subprocess.run(fix_cmd, capture_output=True, text=True)
                             
                             if result.returncode == 0 and os.path.exists(fixed_path):
                                 logger.info("Successfully created fixed duration video")
@@ -306,7 +435,6 @@ def extract_dvd_to_temp(video_path, expected_duration=None):
         logger.error(traceback.format_exc())
         return None
     finally:
-        # Clean up temporary files
         if file_list and os.path.exists(file_list):
             os.remove(file_list)
             logger.debug(f"Removed temporary file list: {file_list}")
@@ -504,54 +632,16 @@ def get_vob_duration(vob_path):
             '-v', 'error',
             '-show_entries', 'format=duration',
             '-of', 'default=noprint_wrappers=1:nokey=1',
-            vob_path
+            '-i', vob_path
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        return float(result.stdout.strip())
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+        logger.error(f"ffprobe failed: {result.stderr}")
+        return None
     except Exception as e:
         logger.error(f"Error getting VOB duration: {e}")
-        raise
-
-
-def extract_frames_from_vob(vob_path, positions, size):
-    """Extract frames from VOB file at specified positions."""
-    width, height = get_thumbnail_dimensions(size)
-    frames = []
-    
-    for position in positions:
-        try:
-            # Use ffmpeg to extract frame at specific timestamp
-            cmd = [
-                'ffmpeg',
-                '-ss', str(position),
-                '-i', vob_path,
-                '-vframes', '1',
-                '-f', 'image2pipe',
-                '-vcodec', 'png',
-                '-'
-            ]
-            
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            out, err = process.communicate()
-            
-            if process.returncode != 0:
-                logger.error(f"Error extracting frame at {position}s: {err.decode()}")
-                continue
-                
-            # Convert PNG bytes to numpy array
-            nparr = np.frombuffer(out, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            if frame is not None:
-                # Resize frame to thumbnail dimensions
-                frame = cv2.resize(frame, (width, height))
-                frames.append(frame)
-                
-        except Exception as e:
-            logger.error(f"Error processing frame at {position}s: {e}")
-            continue
-            
-    return frames
+        return None
 
 
 def extract_one_frame_per_second(video_path, size='default'):
@@ -562,12 +652,18 @@ def extract_one_frame_per_second(video_path, size='default'):
         return extract_from_mp4(video_path, size)
 
 
-def extract_from_vob(vob_path, size):
+def extract_from_vob(vob_path, size, enable_gpu=False):
     """Extract frames directly from VOB file."""
     logger.info(f"Starting direct VOB extraction from {vob_path}")
     
-    # Get video duration
-    duration = get_vob_duration(vob_path)
+    # Get video duration from the main movie info
+    video_ts_path = os.path.dirname(vob_path)
+    movie_info = analyze_vob_files(video_ts_path)
+    if not movie_info:
+        logger.error("Failed to get movie information")
+        return None
+    
+    duration = movie_info['duration']
     logger.info(f"Video duration: {duration:.2f} seconds")
     
     # Calculate frame positions (one per second)
@@ -580,7 +676,56 @@ def extract_from_vob(vob_path, size):
         batch_positions = frame_positions[i:i + BATCH_SIZE]
         logger.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(frame_positions) + BATCH_SIZE - 1)//BATCH_SIZE}")
         
-        batch_frames = extract_frames_from_vob(vob_path, batch_positions, size)
+        # For each position, try all VOB files until we get a valid frame
+        batch_frames = []
+        for position in batch_positions:
+            frame = None
+            for vob_file in movie_info['vob_files']:
+                try:
+                    # Use ffmpeg to extract frame at specific timestamp
+                    cmd = [
+                        'ffmpeg',
+                        '-ss', str(position),
+                        '-i', vob_file,
+                        '-vf', 'yadif=0',  # Deinterlace
+                        '-vframes', '1',
+                        '-f', 'image2pipe',
+                        '-vcodec', 'png',
+                        '-pix_fmt', 'rgb24',
+                        '-vsync', '0',
+                        '-q:v', '2',
+                        '-threads', '0',
+                        '-'
+                    ]
+                    
+                    # Add GPU options if enabled
+                    gpu_options = get_gpu_options(enable_gpu)
+                    if gpu_options:
+                        cmd[1:1] = gpu_options
+                    
+                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    out, err = process.communicate()
+                    
+                    if process.returncode == 0 and out:
+                        # Convert PNG bytes to numpy array
+                        nparr = np.frombuffer(out, np.uint8)
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            width, height = get_thumbnail_dimensions(size)
+                            frame = cv2.resize(frame, (width, height))
+                            break
+                except Exception as e:
+                    logger.warning(f"Failed to extract frame at {position}s from {vob_file}: {e}")
+                    continue
+            
+            if frame is not None:
+                batch_frames.append(frame)
+            else:
+                logger.error(f"Failed to extract frame at {position}s from any VOB file")
+                # Add a black frame as placeholder
+                width, height = get_thumbnail_dimensions(size)
+                batch_frames.append(np.zeros((height, width, 3), dtype=np.uint8))
+        
         all_frames.extend(batch_frames)
         
         # Save checkpoint after each batch
@@ -649,6 +794,8 @@ def main():
     parser.add_argument('--duration', help='Expected video duration in format HH:MM:SS or MM:SS')
     parser.add_argument('--size', choices=['default', 'xl'], default='default',
                       help='Thumbnail size: default (320x180) or xl (640x360)')
+    parser.add_argument('--enable-gpu', action='store_true',
+                      help='Enable GPU acceleration if available')
     args = parser.parse_args()
     
     try:
@@ -687,12 +834,12 @@ def main():
                     logger.error("Failed to analyze VOB files")
                     return
                 
-                # Use the first VOB file for direct extraction
+                # Use the first VOB file as starting point, but process all VOBs
                 vob_file = movie_info['vob_files'][0]
-                frames = extract_from_vob(vob_file, args.size)
+                frames = extract_from_vob(vob_file, args.size, enable_gpu=args.enable_gpu)
             else:
                 # For default size, use MP4 conversion
-                temp_file = extract_dvd_to_temp(video_path, expected_duration)
+                temp_file = extract_dvd_to_temp(video_path, expected_duration, enable_gpu=args.enable_gpu)
                 if not temp_file:
                     logger.error("Failed to extract DVD content")
                     return
@@ -702,7 +849,7 @@ def main():
         else:
             # For regular video files, use appropriate extraction method
             if args.size == 'xl' and is_vob_file(video_path):
-                frames = extract_from_vob(video_path, args.size)
+                frames = extract_from_vob(video_path, args.size, enable_gpu=args.enable_gpu)
             else:
                 frames = extract_from_mp4(video_path, args.size)
 
