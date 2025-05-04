@@ -459,7 +459,7 @@ def main():
     parser.add_argument('--size', choices=['default', 'xl'], default='default',
                       help='Thumbnail size: default (320x180) or xl (640x360)')
     args = parser.parse_args()
-
+    
     try:
         # Update thumbnail dimensions based on size parameter
         global THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT
@@ -481,69 +481,67 @@ def main():
                 logger.error(f"Invalid duration format: {str(e)}")
                 return
 
-        try:
-            if is_dvd_device(video_path):
-                logger.info(f"Processing DVD: {video_path}")
-                dvd_mount = find_dvd_mount()
-                if dvd_mount:
-                    video_path = dvd_mount
-                temp_file = extract_dvd_to_temp(video_path, expected_duration)
-                if not temp_file:
-                    logger.error("Failed to extract DVD content")
-                    return
-                temp_dir = os.path.dirname(temp_file)
-                video_path = temp_file
-
-            # Get video duration and warn about XL size if needed
-            duration = get_video_duration(video_path)
-            if duration is None:
-                logger.error("Could not determine video duration")
+        if is_dvd_device(video_path):
+            logger.info(f"Processing DVD: {video_path}")
+            dvd_mount = find_dvd_mount()
+            if dvd_mount:
+                video_path = dvd_mount
+            temp_file = extract_dvd_to_temp(video_path, expected_duration)
+            if not temp_file:
+                logger.error("Failed to extract DVD content")
                 return
-            warn_xl_size(duration)
+            temp_dir = os.path.dirname(temp_file)
+            video_path = temp_file
 
-            # Try to load checkpoint
-            checkpoint_data, frame_count = load_checkpoint()
-            
-            if frame_count == 0:
-                # Process frames if no checkpoint found
-                cap = cv2.VideoCapture(video_path)
-                if not cap.isOpened():
-                    logger.error(f"Failed to open video file: {video_path}")
-                    return
-                thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
-                cap.release()
-    else:
-                logger.info(f"Resuming from checkpoint with {frame_count} frames")
-                # For now, we'll restart from the beginning if we have a checkpoint
-                # TODO: Implement proper checkpoint resumption
-                cap = cv2.VideoCapture(video_path)
-                if not cap.isOpened():
-                    logger.error(f"Failed to open video file: {video_path}")
-                    return
-                thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
-                cap.release()
+        # Get video duration and warn about XL size if needed
+        duration = get_video_duration(video_path)
+        if duration is None:
+            logger.error("Could not determine video duration")
+            return
+        warn_xl_size(duration)
 
-            # Save the final thumbnail
-            thumbnail.save(args.output)
-            logger.info(f"Thumbnail saved to {args.output}")
+        # Try to load checkpoint
+        checkpoint_data, frame_count = load_checkpoint()
+        
+        if frame_count == 0:
+            # Process frames if no checkpoint found
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                logger.error(f"Failed to open video file: {video_path}")
+                return
+            thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+            cap.release()
+        else:
+            logger.info(f"Resuming from checkpoint with {frame_count} frames")
+            # For now, we'll restart from the beginning if we have a checkpoint
+            # TODO: Implement proper checkpoint resumption
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                logger.error(f"Failed to open video file: {video_path}")
+                return
+            thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+            cap.release()
 
-        finally:
-            # Clean up temporary files
-            if temp_file and os.path.exists(temp_file):
-                logger.debug(f"Removing temporary file: {temp_file}")
-                os.remove(temp_file)
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    logger.debug(f"Removing temporary directory: {temp_dir}")
-                    os.rmdir(temp_dir)
-                except OSError as e:
-                    logger.warning(f"Could not remove temporary directory {temp_dir}: {str(e)}")
-            cleanup()
+        # Save the final thumbnail
+        thumbnail.save(args.output)
+        logger.info(f"Thumbnail saved to {args.output}")
 
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         logger.error(traceback.format_exc())
         raise
+    finally:
+        # Clean up temporary files
+        if temp_file and os.path.exists(temp_file):
+            logger.debug(f"Removing temporary file: {temp_file}")
+            os.remove(temp_file)
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                logger.debug(f"Removing temporary directory: {temp_dir}")
+                os.rmdir(temp_dir)
+            except OSError as e:
+                logger.warning(f"Could not remove temporary directory {temp_dir}: {str(e)}")
+        cleanup()
 
 
 if __name__ == "__main__":
