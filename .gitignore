@@ -34,4 +34,7 @@ frame_*.jpg
 
 # Temporary files
 *.tmp
-*.temp 
+*.temp
+
+# Virtual environment
+.venv/ 
