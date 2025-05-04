@@ -27,3 +27,11 @@ video_thumbnail_*.log
 
 # Exclude checkpoint files
 *.npz 
+
+# Frame files
+thumbnail_frames/
+frame_*.jpg
+
+# Temporary files
+*.tmp
+*.temp 

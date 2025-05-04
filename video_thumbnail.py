@@ -351,11 +351,15 @@ def load_checkpoint() -> Tuple[dict, int]:
     return {}, 0
 
 
-def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int, height: int) -> List[np.ndarray]:
-    """Process frames one at a time, saving each to disk immediately."""
-    # Create directory for frames if it doesn't exist
-    if not os.path.exists(FRAMES_DIR):
-        os.makedirs(FRAMES_DIR)
+def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int, height: int) -> Image.Image:
+    """Process frames one at a time, updating the composite image incrementally."""
+    # Calculate grid dimensions
+    num_rows = (duration + FRAMES_PER_ROW - 1) // FRAMES_PER_ROW
+    thumbnail_width = width * FRAMES_PER_ROW
+    thumbnail_height = height * num_rows
+    
+    # Create blank thumbnail
+    thumbnail = Image.new('RGB', (thumbnail_width, thumbnail_height))
     
     current_second = 0
     frame_count = 0
@@ -374,16 +378,25 @@ def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int
         # Resize frame
         frame = cv2.resize(frame, (width, height))
         
-        # Save frame to disk immediately
-        frame_path = os.path.join(FRAMES_DIR, f'frame_{frame_count:06d}.jpg')
-        cv2.imwrite(frame_path, frame)
+        # Convert to PIL Image
+        frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        
+        # Calculate position in grid
+        row = frame_count // FRAMES_PER_ROW
+        col = frame_count % FRAMES_PER_ROW
+        x = col * width
+        y = row * height
+        
+        # Paste frame into composite
+        thumbnail.paste(frame_pil, (x, y))
         
         # Clear frame from memory
         del frame
+        del frame_pil
         
         # Save checkpoint after each frame
         save_checkpoint({'frame_count': frame_count, 'current_second': current_second}, frame_count)
-        logger.info(f"Saved frame {frame_count} at {current_second} seconds")
+        logger.info(f"Processed frame {frame_count} at {current_second} seconds")
         
         frame_count += 1
         current_second += 1
@@ -392,7 +405,7 @@ def process_frames_in_batches(cap: cv2.VideoCapture, duration: float, width: int
         import gc
         gc.collect()
     
-    return frame_count
+    return thumbnail
 
 
 def create_thumbnail(frame_count: int, size: str = 'default') -> Image.Image:
@@ -446,7 +459,7 @@ def main():
     parser.add_argument('--size', choices=['default', 'xl'], default='default',
                       help='Thumbnail size: default (320x180) or xl (640x360)')
     args = parser.parse_args()
-    
+
     try:
         # Update thumbnail dimensions based on size parameter
         global THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT
@@ -497,20 +510,20 @@ def main():
                 if not cap.isOpened():
                     logger.error(f"Failed to open video file: {video_path}")
                     return
-                frame_count = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+                thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
                 cap.release()
-            else:
+    else:
                 logger.info(f"Resuming from checkpoint with {frame_count} frames")
+                # For now, we'll restart from the beginning if we have a checkpoint
+                # TODO: Implement proper checkpoint resumption
                 cap = cv2.VideoCapture(video_path)
                 if not cap.isOpened():
                     logger.error(f"Failed to open video file: {video_path}")
                     return
-                remaining_frames = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+                thumbnail = process_frames_in_batches(cap, duration, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
                 cap.release()
-                frame_count += remaining_frames
 
-            # Create and save thumbnail
-            thumbnail = create_thumbnail(frame_count, args.size)
+            # Save the final thumbnail
             thumbnail.save(args.output)
             logger.info(f"Thumbnail saved to {args.output}")
 
